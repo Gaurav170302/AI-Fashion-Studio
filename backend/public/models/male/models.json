@@ -1,0 +1,26 @@
+[
+  {
+    "id": "male-casual-01",
+    "name": "Alex",
+    "gender": "male",
+    "category": "casual",
+    "height": "6ft",
+    "image": "https://images.unsplash.com/photo-1617127365659-c47fa864d8bc?q=80&w=400&auto=format&fit=crop"
+  },
+  {
+    "id": "male-fashion-01",
+    "name": "Julian",
+    "gender": "male",
+    "category": "fashion",
+    "height": "6ft 2in",
+    "image": "https://images.unsplash.com/photo-1488161628813-04466f872be2?q=80&w=400&auto=format&fit=crop"
+  },
+  {
+    "id": "male-pro-01",
+    "name": "Marcus",
+    "gender": "male",
+    "category": "professional",
+    "height": "5ft 11in",
+    "image": "https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?q=80&w=400&auto=format&fit=crop"
+  }
+]

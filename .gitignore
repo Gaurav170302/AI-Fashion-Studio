@@ -1,0 +1,9 @@
+node_modules/
+.env
+db_data/
+.DS_Store
+dist/
+build/
+backend/public/uploads/
+backend/public/models/custom/
+frontend/dist/
