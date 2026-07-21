@@ -12,44 +12,7 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ─── Curated full-body neutral model photos (suitable for virtual try-on) ──────
-// These are clean, front-facing full-body shots that work well with IDM-VTON
-const MODEL_PERSONS = {
-  Male: {
-    Casual: {
-      Standing: 'https://images.unsplash.com/photo-1552058544-f2b08422138a?q=90&w=768&auto=format&fit=crop',
-      Walking:  'https://images.unsplash.com/photo-1571945153237-4929e783af4a?q=90&w=768&auto=format&fit=crop',
-      Lifestyle:'https://images.unsplash.com/photo-1564564321837-a57b7070ac4f?q=90&w=768&auto=format&fit=crop'
-    },
-    Fashion: {
-      Standing: 'https://images.unsplash.com/photo-1617127365659-c47fa864d8bc?q=90&w=768&auto=format&fit=crop',
-      Walking:  'https://images.unsplash.com/photo-1488161628813-04466f872be2?q=90&w=768&auto=format&fit=crop',
-      Lifestyle:'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=90&w=768&auto=format&fit=crop'
-    },
-    Professional: {
-      Standing: 'https://images.unsplash.com/photo-1560250097-0b93528c311a?q=90&w=768&auto=format&fit=crop',
-      Walking:  'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?q=90&w=768&auto=format&fit=crop',
-      Lifestyle:'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?q=90&w=768&auto=format&fit=crop'
-    }
-  },
-  Female: {
-    Casual: {
-      Standing: 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?q=90&w=768&auto=format&fit=crop',
-      Walking:  'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?q=90&w=768&auto=format&fit=crop',
-      Lifestyle:'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?q=90&w=768&auto=format&fit=crop'
-    },
-    Fashion: {
-      Standing: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=90&w=768&auto=format&fit=crop',
-      Walking:  'https://images.unsplash.com/photo-1469334031218-e382a71b716b?q=90&w=768&auto=format&fit=crop',
-      Lifestyle:'https://images.unsplash.com/photo-1484399172022-72a90b12e3c1?q=90&w=768&auto=format&fit=crop'
-    },
-    Professional: {
-      Standing: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?q=90&w=768&auto=format&fit=crop',
-      Walking:  'https://images.unsplash.com/photo-1573497019236-61f323342eb9?q=90&w=768&auto=format&fit=crop',
-      Lifestyle:'https://images.unsplash.com/photo-1580489944761-15a19d654956?q=90&w=768&auto=format&fit=crop'
-    }
-  }
-};
+
 
 // ─── Upload garment to Litterbox to get a public URL ──────────────────────────
 async function uploadToLitterbox(localFilePath) {
@@ -253,9 +216,14 @@ router.post('/', protect, async (req, res) => {
     }
 
     // ── Pick the person model photo ────────────────────────────────────────────
-    let personImageUrl = staticModelUrl || MODEL_PERSONS[modelType]?.[style]?.[pose]
-      || MODEL_PERSONS[modelType]?.Casual?.Standing
-      || MODEL_PERSONS.Female.Casual.Standing;
+    if (!staticModelUrl && !personImageId) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select a model."
+      });
+    }
+
+    let personImageUrl = staticModelUrl || null;
 
     if (personImageId) {
       const personGarment = await Garment.findById(personImageId);
@@ -323,9 +291,9 @@ router.post('/', protect, async (req, res) => {
             console.log(`[Nymbo] Success: ${finalGeneratedUrl.slice(0, 80)}...`);
           } catch (nymboErr) {
             console.error(`[Nymbo] Also failed: ${nymboErr.message}`);
-            console.warn('[Mock Fallback] Both HF spaces failed. Returning mock image so UI does not crash.');
-            // This mock image ensures the UI "succeeds" during development even when HF is down
-            finalGeneratedUrl = "https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?q=80&w=800&auto=format&fit=crop";
+            throw new Error(
+              "Virtual Try-On failed. IDM-VTON and Nymbo services are unavailable."
+            );
           }
         }
       } else {

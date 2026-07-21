@@ -70,10 +70,10 @@ export const api = {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || 'Failed to fetch models');
-      return data.models;
+      return data;
     } catch (error) {
       console.warn("API Fetch models failed:", error.message);
-      return []; // Return empty array on failure
+      return { male: [], female: [], kids: [] };
     }
   },
 

@@ -54,7 +54,7 @@ const LOADING_STEPS = [
 ];
 
 export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, addToast }) {
-  const [libraryModels, setLibraryModels] = useState([]);
+  const [libraryModels, setLibraryModels] = useState({ male: [], female: [], kids: [] });
   const [modelTab, setModelTab] = useState('male'); // male, female, kids, custom
   const [selectedLibraryModel, setSelectedLibraryModel] = useState(null);
   
@@ -83,11 +83,10 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
   const timerRef = useRef(null);
 
   useEffect(() => {
-    api.getModels().then(models => {
-      setLibraryModels(models);
-      if (models.length > 0) {
-        const firstMale = models.find(m => m.gender === 'male');
-        if (firstMale) setSelectedLibraryModel(firstMale.id);
+    api.getModels().then(data => {
+      setLibraryModels(data);
+      if (data?.male?.length > 0) {
+        setSelectedLibraryModel(data.male[0].id);
       }
     });
   }, []);
@@ -209,9 +208,10 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
         const uploadedPerson = await api.uploadGarment(personFile, 'Person');
         personImageId = uploadedPerson._id;
       } else {
-        const selectedModelObj = libraryModels.find(m => m.id === selectedLibraryModel);
+        const allModels = [...(libraryModels.male || []), ...(libraryModels.female || []), ...(libraryModels.kids || [])];
+        const selectedModelObj = allModels.find(m => m.id === selectedLibraryModel);
         if (selectedModelObj) {
-          staticModelUrl = selectedModelObj.image;
+          staticModelUrl = selectedModelObj.imageUrl;
         } else {
           throw new Error('No library model selected.');
         }
@@ -438,7 +438,7 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
             </div>
           ) : (
             <div className="grid grid-cols-2 lg:grid-cols-2 gap-2 max-h-[220px] overflow-y-auto p-1 custom-scrollbar">
-              {libraryModels.filter(m => m.gender === modelTab).map(model => (
+              {(libraryModels[modelTab] || []).map(model => (
                 <button
                   key={model.id}
                   onClick={() => setSelectedLibraryModel(model.id)}
@@ -449,11 +449,11 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
                   }`}
                 >
                   <div className="w-full aspect-[3/4] relative">
-                    <img src={model.image || model.thumb} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" alt={model.name} />
+                    <img src={model.imageUrl} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" alt={model.name} />
                   </div>
                   <div className="p-2 flex flex-col items-start w-full bg-slate-900/90 backdrop-blur">
                     <span className="text-[11px] font-bold text-white">{model.name}</span>
-                    <span className="text-[9px] text-gray-400 uppercase tracking-wide">{model.height} · {model.category}</span>
+                    <span className="text-[9px] text-gray-400 uppercase tracking-wide">{model.pose} · {model.gender}</span>
                   </div>
                   {selectedLibraryModel === model.id && (
                     <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-primary border-2 border-white/10 flex items-center justify-center">
