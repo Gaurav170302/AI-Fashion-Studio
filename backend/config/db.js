@@ -145,6 +145,27 @@ const setupMockModels = () => {
     }));
   };
 
+  User.updatePassword = async function (email, hashedPassword) {
+    const users = readData('User');
+    const idx = users.findIndex(u => u.email === email.toLowerCase().trim());
+    if (idx === -1) return false;
+    users[idx].password = hashedPassword;
+    writeData('User', users);
+    return true;
+  };
+
+  User.findOneAndUpdate = function (query, update) {
+    return Promise.resolve().then(async () => {
+      const users = readData('User');
+      const idx = users.findIndex(u => u.email === (query.email || '').toLowerCase().trim());
+      if (idx === -1) return null;
+      if (update.password) users[idx].password = update.password;
+      writeData('User', users);
+      return users[idx];
+    });
+  };
+
+
   // Mock Garment
   Garment.create = function (data) {
     return Promise.resolve().then(() => {

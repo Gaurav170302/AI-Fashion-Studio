@@ -1,5 +1,6 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
 import { protect } from '../middleware/auth.js';
 
@@ -26,9 +27,10 @@ router.post('/register', async (req, res) => {
     if (userExists) {
       return res.status(400).json({
         success: false,
-        message: 'User already exists'
+        message: `An account with ${email} already exists. Please log in instead.`
       });
     }
+
 
     // Create user
     const user = await User.create({
@@ -51,9 +53,29 @@ router.post('/register', async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('[Register Error]', error.message);
+
+    // Mongoose duplicate key — email already taken
+    if (error.code === 11000) {
+      const value = error.keyValue?.email || '';
+      return res.status(400).json({
+        success: false,
+        message: `An account with ${value || 'that email'} already exists. Please log in instead.`
+      });
+    }
+
+    // Mongoose validation error (bad email format, minlength, missing fields)
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join('. ')
+      });
+    }
+
     res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message || 'Registration failed. Please try again.'
     });
   }
 });
@@ -130,6 +152,63 @@ router.get('/me', protect, async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+});
+
+// @desc    Reset password (no email token needed — direct reset)
+// @route   POST /api/auth/reset-password
+// @access  Public
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { email, newPassword } = req.body;
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Email and new password are required.' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Hash the new password
+    const salt = await bcrypt.genSalt(10);
+    const hashed = await bcrypt.hash(newPassword, salt);
+
+    let updated = false;
+
+    // ── File-based DB path (mock) ────────────────────────────────────────────
+    if (typeof User.updatePassword === 'function') {
+      updated = await User.updatePassword(normalizedEmail, hashed);
+    }
+
+    // ── MongoDB / Mongoose path ──────────────────────────────────────────────
+    if (!updated) {
+      const result = await User.findOneAndUpdate(
+        { email: normalizedEmail },
+        { password: hashed },
+        { new: true }
+      );
+      updated = !!result;
+    }
+
+    if (!updated) {
+      // Email not found — return success anyway (don't reveal existence)
+      return res.status(200).json({
+        success: true,
+        message: 'If that email is registered, your password has been updated.'
+      });
+    }
+
+    console.log(`[Auth] ✓ Password reset for: ${normalizedEmail}`);
+    return res.status(200).json({
+      success: true,
+      message: 'Password reset successfully. You can now log in.'
+    });
+
+  } catch (error) {
+    console.error('[Reset Password Error]', error.message);
+    res.status(500).json({ success: false, message: 'Password reset failed. Please try again.' });
   }
 });
 

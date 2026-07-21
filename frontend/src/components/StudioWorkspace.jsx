@@ -174,19 +174,10 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
     setGenerationStatus('uploading');
     setGeneratedResult(null);
     setLoadingPercent(0);
-    setLoadingMsg(LOADING_STEPS[0].msg);
+    setLoadingMsg('Connecting to TryOn Engine...');
     setImgLoaded(false);
     setImgError(false);
     startElapsedTimer();
-
-    // Animate progress
-    let stepIdx = 0;
-    const progressInterval = setInterval(() => {
-      stepIdx = Math.min(stepIdx + 1, LOADING_STEPS.length - 1);
-      setLoadingPercent(LOADING_STEPS[stepIdx].pct);
-      setLoadingMsg(LOADING_STEPS[stepIdx].msg);
-      if (stepIdx > 2) setGenerationStatus('generating');
-    }, Math.floor(Math.random() * 2000) + 6000);
 
     try {
       let finalGarmentIdOrUrl = '';
@@ -218,7 +209,7 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
       }
 
       setGenerationStatus('generating');
-      const result = await api.generateImage(finalGarmentIdOrUrl, { 
+      const response = await api.generateImage(finalGarmentIdOrUrl, { 
         modelType: modelTab === 'custom' ? 'Custom' : (modelTab.charAt(0).toUpperCase() + modelTab.slice(1)), 
         style, 
         pose: 'Standing', 
@@ -228,28 +219,58 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
         qualityMode
       });
 
-      clearInterval(progressInterval);
-      stopElapsedTimer();
-      setLoadingPercent(100);
-      setLoadingMsg('Done!');
-      setGenerationStatus('done');
+      if (!response.jobId) throw new Error('Failed to get Job ID from server');
 
-      const newGeneration = {
-        id: result._id,
-        garmentUrl: garmentSrc,
-        generatedImageUrl: result.generatedImageUrl,
-        category,
-        modelType: modelTab,
-        style,
-        pose: 'Standing',
-        createdAt: result.createdAt
-      };
+      const jobId = response.jobId;
 
-      setGeneratedResult(newGeneration);
-      onSaveGeneration(newGeneration);
-      addToast('✨ Virtual try-on complete!', 'success');
+      // Start Polling
+      const pollInterval = setInterval(async () => {
+        try {
+          const job = await api.getJobStatus(jobId);
+          setLoadingMsg(job.message || 'Processing...');
+          
+          if (job.status === 'completed') {
+            clearInterval(pollInterval);
+            stopElapsedTimer();
+            setLoadingPercent(100);
+            setLoadingMsg('Done!');
+            setGenerationStatus('done');
+
+            const newGeneration = {
+              id: job.dbRecordId || jobId,
+              garmentUrl: garmentSrc,
+              generatedImageUrl: job.resultUrl,
+              category,
+              modelType: modelTab,
+              style,
+              pose: 'Standing',
+              createdAt: job.createdAt
+            };
+
+            setGeneratedResult(newGeneration);
+            onSaveGeneration(newGeneration);
+            addToast('✨ Virtual try-on complete!', 'success');
+            setGenerating(false);
+          } else if (job.status === 'failed') {
+            clearInterval(pollInterval);
+            throw new Error(job.error || job.message || 'Generation failed.');
+          } else {
+            // Processing/Pending - animate progress bar slowly
+            setLoadingPercent(p => Math.min(p + (Math.random() * 5 + 1), 95));
+          }
+        } catch (pollErr) {
+          clearInterval(pollInterval);
+          stopElapsedTimer();
+          console.error('Polling error:', pollErr);
+          setGenerationError(pollErr.message);
+          addToast(pollErr.message, 'error');
+          setLoadingPercent(0);
+          setGenerationStatus('error');
+          setGenerating(false);
+        }
+      }, 2000);
+
     } catch (err) {
-      clearInterval(progressInterval);
       stopElapsedTimer();
       console.error('Generation error:', err);
       const errMsg = err.message || 'Generation failed. Please try again.';
@@ -257,7 +278,7 @@ export default function StudioWorkspace({ user, onOpenAuth, onSaveGeneration, ad
       addToast(errMsg, 'error');
       setLoadingPercent(0);
       setGenerationStatus('error');
-    } finally {
+      // In catch block (initial setup errors)
       setGenerating(false);
     }
   };

@@ -111,9 +111,42 @@ export const api = {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || 'AI Generation failed');
-      return data.generatedImage;
+      return data;
     } catch (error) {
       console.warn("API Generation failed:", error.message);
+      throw error;
+    }
+  },
+
+  // Reset password (no email required)
+  async resetPassword(email, newPassword) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, newPassword })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || 'Password reset failed');
+      return data;
+    } catch (error) {
+      console.warn("API Reset password failed:", error.message);
+      throw error;
+    }
+  },
+
+
+  async getJobStatus(jobId) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/generate/status/${jobId}`, {
+        method: 'GET',
+        headers: getHeaders()
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || 'Failed to fetch job status');
+      return data.job;
+    } catch (error) {
+      console.warn("API Get job status failed:", error.message);
       throw error;
     }
   },

@@ -11,8 +11,28 @@ import generateRoutes from './routes/generate.js';
 import generatedImageRoutes from './routes/generatedImages.js';
 import modelRoutes from './routes/models.js';
 
+import { tryOnManager } from './services/tryon/TryOnManager.js';
+
 // Load env vars
 dotenv.config();
+
+// Validate Environment Variables
+function validateEnvironment() {
+  console.log('--- Environment Validation ---');
+  if (!process.env.REPLICATE_API_TOKEN) {
+    console.warn('⚠️  REPLICATE_API_TOKEN is missing. Replicate VTON will be offline.');
+  } else {
+    console.log('✓ REPLICATE_API_TOKEN found.');
+  }
+  
+  if (!process.env.HF_TOKEN) {
+    console.warn('⚠️  HF_TOKEN is missing. IDM-VTON and Nymbo will use free tier without ZeroGPU quota guarantees.');
+  } else {
+    console.log('✓ HF_TOKEN found.');
+  }
+  console.log('------------------------------');
+}
+validateEnvironment();
 
 // Connect to database
 connectDB();
@@ -57,6 +77,11 @@ app.get('/', (req, res) => {
   res.json({ message: 'AI Fashion Studio API is active and running' });
 });
 
+// Health Route
+app.get('/api/health', (req, res) => {
+  res.json(tryOnManager.getHealthStatus());
+});
+
 // Dev error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
@@ -68,8 +93,10 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running in development mode on port ${PORT}`);
+  // Initialize AI Provider Health Checks
+  await tryOnManager.initializeHealth();
 });
 // Trigger reload
 

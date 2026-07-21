@@ -3,322 +3,294 @@ import Replicate from 'replicate';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Client } from '@gradio/client';
 import Garment from '../models/Garment.js';
 import GeneratedImage from '../models/GeneratedImage.js';
 import { protect } from '../middleware/auth.js';
+import { tryOnManager } from '../services/tryon/TryOnManager.js';
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-
-
-// ─── Upload garment to Litterbox to get a public URL ──────────────────────────
+// ─── Upload any local file to Litterbox → public URL ──────────────────────────
 async function uploadToLitterbox(localFilePath) {
   try {
-    if (!fs.existsSync(localFilePath)) throw new Error(`File not found: ${localFilePath}`);
+    if (!fs.existsSync(localFilePath)) {
+      throw new Error(`File not found at: ${localFilePath}`);
+    }
     const fileBuffer = fs.readFileSync(localFilePath);
     const filename = path.basename(localFilePath);
     const ext = path.extname(filename).toLowerCase();
-    const mimeType = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
+    const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+
     const formData = new FormData();
     formData.append('reqtype', 'fileupload');
-    formData.append('time', '1h');
+    formData.append('time', '1h'); // 1 hour — enough for generation
     formData.append('fileToUpload', new Blob([fileBuffer], { type: mimeType }), filename);
+
     const response = await fetch('https://litterbox.catbox.moe/resources/internals/api.php', {
-      method: 'POST', body: formData, signal: AbortSignal.timeout(25000)
+      method: 'POST',
+      body: formData,
+      signal: AbortSignal.timeout(30000)
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    if (!response.ok) throw new Error(`Litterbox HTTP ${response.status}`);
     const text = (await response.text()).trim();
-    if (!text.startsWith('http')) throw new Error(`Bad response: ${text}`);
-    console.log(`✓ Garment hosted at Litterbox: ${text}`);
+    if (!text.startsWith('http')) throw new Error(`Litterbox bad response: "${text}"`);
+
+    console.log(`✓ Uploaded to Litterbox: ${text}`);
     return text;
   } catch (err) {
-    console.warn(`✗ Litterbox failed: ${err.message}`);
+    console.error(`✗ Litterbox upload failed: ${err.message}`);
     return null;
   }
 }
 
-// ─── REAL Virtual Try-On via HuggingFace IDM-VTON Space ───────────────────────
-// This actually places the garment ON the model — not a text-to-image hack!
-async function virtualTryOnIDMVTON(personImageUrl, garmentImageUrl, garmentCategory, seed) {
-  console.log('[IDM-VTON] Connecting to HuggingFace Space...');
+// ─── Resolve a model/person image URL to a public-accessible URL ───────────────
+// If it's a localhost URL (local model file), upload it to Litterbox first.
+async function resolveToPublicUrl(rawUrl, localSearchDirs = []) {
+  if (!rawUrl) return null;
 
-  // Use the yisol IDM-VTON space (free, public, uses IDM-VTON model)
-  const hfOptions = process.env.HF_TOKEN ? { hf_token: process.env.HF_TOKEN, events: ['data', 'status', 'log', 'error'] } : { events: ['data', 'status', 'log', 'error'] };
-  const client = await Client.connect('yisol/IDM-VTON', hfOptions);
+  // Already fully public
+  if (rawUrl.startsWith('https://') && !rawUrl.includes('localhost')) {
+    return rawUrl;
+  }
 
-  console.log('[IDM-VTON] Fetching person and garment images...');
+  // Extract filename from any URL type
+  const filename = path.basename(rawUrl.split('?')[0]);
 
-  // Fetch both images as Blobs for the Gradio client
-  const [personRes, garmentRes] = await Promise.all([
-    fetch(personImageUrl, { signal: AbortSignal.timeout(20000) }),
-    fetch(garmentImageUrl, { signal: AbortSignal.timeout(20000) })
-  ]);
+  // Try each directory
+  for (const dir of localSearchDirs) {
+    const fullPath = path.join(dir, filename);
+    if (fs.existsSync(fullPath)) {
+      console.log(`[Litterbox] Found local file: ${fullPath}`);
+      return await uploadToLitterbox(fullPath);
+    }
+  }
 
-  if (!personRes.ok) throw new Error(`Failed to fetch person image: ${personRes.status}`);
-  if (!garmentRes.ok) throw new Error(`Failed to fetch garment image: ${garmentRes.status}`);
+  // If it contains a path hint after /models/ or /uploads/
+  const modelMatch = rawUrl.match(/\/models\/(.+)$/);
+  if (modelMatch) {
+    const relativePath = modelMatch[1];
+    const absPath = path.join(__dirname, '../public/models', relativePath);
+    if (fs.existsSync(absPath)) {
+      console.log(`[Litterbox] Found model image: ${absPath}`);
+      return await uploadToLitterbox(absPath);
+    }
+  }
 
-  const personBlob = await personRes.blob();
-  const garmentBlob = await garmentRes.blob();
+  const uploadMatch = rawUrl.match(/\/uploads\/(.+)$/);
+  if (uploadMatch) {
+    const absPath = path.join(__dirname, '../public/uploads', uploadMatch[1]);
+    if (fs.existsSync(absPath)) {
+      console.log(`[Litterbox] Found upload file: ${absPath}`);
+      return await uploadToLitterbox(absPath);
+    }
+  }
 
-  // Garment description for the model
-  const garmentDescMap = {
-    'T-Shirt': 'a casual fitted t-shirt',
-    'Shirt': 'a tailored button-up shirt',
-    'Hoodie': 'a comfortable hoodie sweatshirt',
-    'Dress': 'a fashionable dress'
-  };
-  const garmentDesc = garmentDescMap[garmentCategory] || 'a garment';
-
-  console.log(`[IDM-VTON] Submitting try-on: garment="${garmentDesc}", seed=${seed}`);
-
-  // Call the try-on function
-  // IDM-VTON Space params: person_image, garment_image, garment_description,
-  //                        auto_mask, auto_crop, denoise_steps, seed
-  const result = await client.predict('/tryon', {
-    dict: {
-      background: personBlob,
-      layers: [],
-      composite: null
-    },
-    garm_img: garmentBlob,
-    garment_des: garmentDesc,
-    is_checked: true,       // Auto-generate mask (recommended)
-    is_checked_crop: false, // Don't auto-crop
-    denoise_steps: 30,
-    seed: seed || Math.floor(Math.random() * 9999)
-  });
-
-  console.log('[IDM-VTON] Result received!');
-
-  // Extract the output image URL from Gradio response
-  if (!result?.data?.[0]) throw new Error('No output image from IDM-VTON');
-
-  const outputImg = result.data[0];
-
-  // Gradio can return the image as URL, path, or base64
-  if (typeof outputImg === 'string' && outputImg.startsWith('http')) return outputImg;
-  if (outputImg?.url) return outputImg.url;
-  if (outputImg?.path) return `https://yisol-idm-vton.hf.space/file=${outputImg.path}`;
-
-  // If it's a base64 data URI, return it directly
-  if (typeof outputImg === 'string' && outputImg.startsWith('data:')) return outputImg;
-
-  throw new Error(`Cannot parse IDM-VTON output: ${JSON.stringify(outputImg).slice(0, 100)}`);
-}
-
-// ─── REAL Virtual Try-On via Nymbo Space (fallback — different GPU cluster) ──
-async function virtualTryOnNymbo(personImageUrl, garmentImageUrl, garmentCategory, seed) {
-  console.log('[Nymbo] Connecting to Nymbo/Virtual-Try-On Space...');
-
-  const hfOptions = process.env.HF_TOKEN
-    ? { hf_token: process.env.HF_TOKEN, events: ['data', 'status', 'log', 'error'] }
-    : { events: ['data', 'status', 'log', 'error'] };
-
-  const client = await Client.connect('Nymbo/Virtual-Try-On', hfOptions);
-
-  console.log('[Nymbo] Fetching person and garment images...');
-
-  const [personRes, garmentRes] = await Promise.all([
-    fetch(personImageUrl, { signal: AbortSignal.timeout(20000) }),
-    fetch(garmentImageUrl, { signal: AbortSignal.timeout(20000) })
-  ]);
-
-  if (!personRes.ok) throw new Error(`Failed to fetch person image: ${personRes.status}`);
-  if (!garmentRes.ok) throw new Error(`Failed to fetch garment image: ${garmentRes.status}`);
-
-  const personBlob = await personRes.blob();
-  const garmentBlob = await garmentRes.blob();
-
-  const garmentDescMap = {
-    'T-Shirt': 'Short Sleeve Round Neck T-Shirt',
-    'Shirt': 'Button-up Dress Shirt with Collar',
-    'Hoodie': 'Pullover Hoodie Sweatshirt',
-    'Dress': 'Casual Fashion Dress'
-  };
-  const garmentDesc = garmentDescMap[garmentCategory] || garmentCategory;
-
-  console.log(`[Nymbo] Submitting try-on, seed=${seed}...`);
-
-  const result = await client.predict('/tryon', {
-    dict: {
-      background: personBlob,
-      layers: [],
-      composite: null
-    },
-    garm_img: garmentBlob,
-    garment_des: garmentDesc,
-    is_checked: true,
-    is_checked_crop: false,
-    denoise_steps: 30,
-    seed: seed || Math.floor(Math.random() * 9999)
-  });
-
-  console.log('[Nymbo] Result received!');
-
-  if (!result?.data?.[0]) throw new Error('No output image from Nymbo');
-
-  const outputImg = result.data[0];
-  if (typeof outputImg === 'string' && outputImg.startsWith('http')) return outputImg;
-  if (outputImg?.url) return outputImg.url;
-  if (outputImg?.path) return `https://nymbo-virtual-try-on.hf.space/file=${outputImg.path}`;
-  if (typeof outputImg === 'string' && outputImg.startsWith('data:')) return outputImg;
-
-  throw new Error(`Cannot parse Nymbo output: ${JSON.stringify(outputImg).slice(0, 100)}`);
+  console.warn(`[Litterbox] Could not resolve "${rawUrl}" to a local file`);
+  return null;
 }
 
 // ─── POST /api/generate ────────────────────────────────────────────────────────
 router.post('/', protect, async (req, res) => {
   try {
-    const { garmentId, modelType, style, pose, category, personImageId, staticModelUrl, qualityMode } = req.body;
+    const {
+      garmentId,
+      modelType,
+      style,
+      pose,
+      category,
+      personImageId,
+      staticModelUrl,
+      qualityMode
+    } = req.body;
 
-    if (!garmentId || !modelType || !style || !pose) {
-      return res.status(400).json({ success: false, message: 'Missing required: garmentId, modelType, style, pose' });
+    // ── Validate required fields ─────────────────────────────────────────────
+    if (!garmentId) {
+      return res.status(400).json({ success: false, message: 'Garment image is required.' });
+    }
+    if (!staticModelUrl && !personImageId) {
+      return res.status(400).json({ success: false, message: 'Please select a model.' });
     }
 
-    let garmentUrl = '';
+    // ─────────────────────────────────────────────────────────────────────────
+    // STEP 1: Resolve Garment to Public URL
+    // ─────────────────────────────────────────────────────────────────────────
     let garmentPublicUrl = null;
     let garmentCategory = category || 'T-Shirt';
     let dbGarmentId = null;
 
-    // ── Resolve garment ────────────────────────────────────────────────────────
-    if (garmentId.startsWith('https://') || garmentId.startsWith('http://images.unsplash')) {
-      // Public URL (demo template from Unsplash) — use directly
-      garmentUrl = garmentId;
+    if (garmentId.startsWith('https://') && !garmentId.includes('localhost')) {
+      // Already public (Unsplash template, Cloudinary, etc.)
       garmentPublicUrl = garmentId;
-      console.log('[Garment] Public URL (template)');
+      console.log('[Garment] Using public URL directly');
 
     } else if (garmentId.startsWith('data:')) {
-      // Base64 data URL — can't pass to external API directly
-      garmentUrl = garmentId;
-      garmentPublicUrl = null;
-      console.log('[Garment] Base64 (no public URL)');
+      // Base64 — cannot be used by external APIs
+      return res.status(400).json({
+        success: false,
+        message: 'Garment must be uploaded (not base64). Please upload the file first.'
+      });
 
     } else {
-      // MongoDB ID — look up garment in DB
-      const garment = await Garment.findById(garmentId);
-      if (!garment) return res.status(404).json({ success: false, message: 'Garment not found' });
-      garmentUrl = garment.imageUrl;
+      // MongoDB ObjectId — look up in DB
+      const garment = await Garment.findById(garmentId).catch(() => null);
+      if (!garment) {
+        return res.status(404).json({ success: false, message: 'Garment not found in database.' });
+      }
       garmentCategory = garment.category || garmentCategory;
       dbGarmentId = garment._id;
 
-      if (garmentUrl.startsWith('http://localhost') || !garmentUrl.startsWith('http')) {
-        // Local file — must upload to Litterbox for a public URL
-        const filename = path.basename(garmentUrl);
-        const localPath = path.join(__dirname, '../public/uploads', filename);
-        console.log(`[Garment] Uploading local file to Litterbox: ${filename}`);
-        garmentPublicUrl = await uploadToLitterbox(localPath);
+      const rawGarmentUrl = garment.imageUrl;
+      console.log(`[Garment] DB record found. Raw URL: ${rawGarmentUrl}`);
+
+      if (rawGarmentUrl.startsWith('https://') && !rawGarmentUrl.includes('localhost')) {
+        // Already public (Cloudinary, etc.)
+        garmentPublicUrl = rawGarmentUrl;
       } else {
-        garmentPublicUrl = garmentUrl; // Already public (Cloudinary)
+        // Local file — upload to Litterbox
+        const filename = path.basename(rawGarmentUrl.split('?')[0]);
+        const localPath = path.join(__dirname, '../public/uploads', filename);
+        console.log(`[Garment] Uploading to Litterbox: ${filename}`);
+        garmentPublicUrl = await uploadToLitterbox(localPath);
       }
     }
 
-    // ── Pick the person model photo ────────────────────────────────────────────
-    if (!staticModelUrl && !personImageId) {
+    if (!garmentPublicUrl) {
       return res.status(400).json({
         success: false,
-        message: "Please select a model."
+        message: 'Could not get a public URL for the garment. Please try re-uploading.'
       });
     }
 
-    let personImageUrl = staticModelUrl || null;
+    // ─────────────────────────────────────────────────────────────────────────
+    // STEP 2: Resolve Person / Model Image to Public URL
+    // ─────────────────────────────────────────────────────────────────────────
+    let personPublicUrl = null;
 
     if (personImageId) {
-      const personGarment = await Garment.findById(personImageId);
-      if (personGarment) {
-        let pUrl = personGarment.imageUrl;
-        if (pUrl.startsWith('http://localhost') || !pUrl.startsWith('http')) {
-          const pFilename = path.basename(pUrl);
-          const pLocalPath = path.join(__dirname, '../public/uploads', pFilename);
-          console.log(`[Person] Uploading local file to Litterbox: ${pFilename}`);
-          personImageUrl = await uploadToLitterbox(pLocalPath) || pUrl;
-        } else {
-          personImageUrl = pUrl;
-        }
-        console.log(`[Person] Custom person image resolved: ${personImageUrl}`);
+      // Custom uploaded person photo
+      const personGarment = await Garment.findById(personImageId).catch(() => null);
+      if (!personGarment) {
+        return res.status(404).json({ success: false, message: 'Uploaded person image not found.' });
       }
-    }
+      const rawPersonUrl = personGarment.imageUrl;
+      console.log(`[Person] Custom upload raw URL: ${rawPersonUrl}`);
 
-    console.log(`[Generate] Quality: ${qualityMode || 'Standard'}, Category: ${garmentCategory}`);
-
-    let finalGeneratedUrl = '';
-
-    // ── PRODUCTION: Replicate IDM-VTON (when API key is configured) ────────────
-    if (process.env.REPLICATE_API_TOKEN) {
-      console.log('[Production] Using Replicate IDM-VTON...');
-      const replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN });
-      const vtonGarmentUrl = garmentPublicUrl || garmentUrl;
-      const output = await replicate.run(
-        'cuuupid/idm-vton:0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985',
-        {
-          input: {
-            crop: true,
-            seed: Math.floor(Math.random() * 999999),
-            steps: 30,
-            category: garmentCategory.toLowerCase().includes('dress') ? 'dresses' : 'upper_body',
-            force_dc: false,
-            garm_img: vtonGarmentUrl,
-            human_img: personImageUrl,
-            mask_only: false,
-            guidance_scale: 2.5
-          }
-        }
-      );
-      finalGeneratedUrl = Array.isArray(output) ? output[0] : String(output);
-      console.log(`[Replicate] Done: ${finalGeneratedUrl}`);
-
-    } else {
-      // ── DEMO: HuggingFace IDM-VTON Space (free, real virtual try-on) ──────
-      const seed = Math.floor(Math.random() * 9999);
-
-      if (garmentPublicUrl) {
-        // Engine 1: IDM-VTON
-        try {
-          finalGeneratedUrl = await virtualTryOnIDMVTON(personImageUrl, garmentPublicUrl, garmentCategory, seed);
-          console.log(`[IDM-VTON] Success: ${finalGeneratedUrl.slice(0, 80)}...`);
-        } catch (hfErr) {
-          const isQuota = hfErr.message?.includes('quota') || hfErr.message?.includes('exceeded');
-          if (isQuota) {
-            console.warn('[IDM-VTON] Quota exceeded. Falling back to Kolors Try-On...');
-          } else {
-            console.warn(`[IDM-VTON] Failed: ${hfErr.message}. Trying Kolors fallback...`);
-          }
-          // Engine 2: Nymbo Virtual Try-On (different GPU cluster)
-          try {
-            finalGeneratedUrl = await virtualTryOnNymbo(personImageUrl, garmentPublicUrl, garmentCategory, seed);
-            console.log(`[Nymbo] Success: ${finalGeneratedUrl.slice(0, 80)}...`);
-          } catch (nymboErr) {
-            console.error(`[Nymbo] Also failed: ${nymboErr.message}`);
-            throw new Error(
-              "Virtual Try-On failed. IDM-VTON and Nymbo services are unavailable."
-            );
-          }
-        }
+      if (rawPersonUrl.startsWith('https://') && !rawPersonUrl.includes('localhost')) {
+        personPublicUrl = rawPersonUrl;
       } else {
-        // No public garment URL (base64 only) — Cannot do try-on
-        console.warn('[Demo] No public garment URL available for Try-On.');
-        throw new Error('Model service unavailable. Could not resolve public URL for garment.');
+        const pFilename = path.basename(rawPersonUrl.split('?')[0]);
+        const pLocalPath = path.join(__dirname, '../public/uploads', pFilename);
+        console.log(`[Person] Uploading custom person to Litterbox: ${pFilename}`);
+        personPublicUrl = await uploadToLitterbox(pLocalPath);
+      }
+
+    } else if (staticModelUrl) {
+      // Library model — URL from GET /api/models (e.g. http://localhost:5000/models/male/male-standing.jpg)
+      console.log(`[Person] Library model URL: ${staticModelUrl}`);
+
+      if (staticModelUrl.startsWith('https://') && !staticModelUrl.includes('localhost')) {
+        // Already public
+        personPublicUrl = staticModelUrl;
+      } else {
+        // localhost URL — resolve local file path and upload
+        personPublicUrl = await resolveToPublicUrl(staticModelUrl, [
+          path.join(__dirname, '../public/models/male'),
+          path.join(__dirname, '../public/models/female'),
+          path.join(__dirname, '../public/models/kids')
+        ]);
       }
     }
 
-    // ── Save to DB ─────────────────────────────────────────────────────────────
-    const generatedImage = await GeneratedImage.create({
-      userId: req.user._id,
-      garmentId: dbGarmentId,
-      generatedImageUrl: finalGeneratedUrl,
-      modelType,
-      style,
-      pose
-    });
+    if (!personPublicUrl) {
+      return res.status(400).json({
+        success: false,
+        message: 'Could not get a public URL for the selected model. Please select another model.'
+      });
+    }
 
-    res.status(201).json({ success: true, generatedImage });
+    // ─────────────────────────────────────────────────────────────────────────
+    // DEBUG LOG
+    // ─────────────────────────────────────────────────────────────────────────
+    console.log('====================================');
+    console.log('MODEL URL:', personPublicUrl);
+    console.log('GARMENT URL:', garmentPublicUrl);
+    console.log('CATEGORY:', garmentCategory);
+    console.log('STYLE:', style);
+    console.log('POSE:', pose || 'Standing');
+    console.log('QUALITY:', qualityMode || 'Standard');
+    console.log('HF TOKEN:', process.env.HF_TOKEN ? 'FOUND' : 'MISSING');
+    console.log('====================================');
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STEP 3: Create and Start Job
+    // ─────────────────────────────────────────────────────────────────────────
+    const jobId = tryOnManager.createJob(
+      req.user._id,
+      dbGarmentId,
+      personPublicUrl,
+      garmentPublicUrl,
+      garmentCategory,
+      style || 'Casual',
+      pose || 'Standing',
+      modelType || 'Female'
+    );
+
+    // Background execution
+    (async () => {
+      try {
+        await tryOnManager.executeJob(jobId);
+        const job = tryOnManager.getJob(jobId);
+
+        if (job?.status === 'completed' && job.resultUrl) {
+          const generatedImage = await GeneratedImage.create({
+            userId: job.userId,
+            garmentId: job.dbGarmentId,
+            generatedImageUrl: job.resultUrl,
+            modelType: job.modelType,
+            style: job.style,
+            pose: job.pose
+          });
+          tryOnManager.updateJob(jobId, {
+            dbRecordId: generatedImage._id,
+            message: 'Complete — saved to your history'
+          });
+          console.log(`[Generate] ✓ Saved result to DB: ${generatedImage._id}`);
+        }
+      } catch (err) {
+        console.error('[Generate Worker Error]', err.message);
+        tryOnManager.updateJob(jobId, {
+          status: 'failed',
+          error: err.message,
+          message: `Internal error: ${err.message}`
+        });
+      }
+    })();
+
+    // Return job ID immediately for polling
+    res.status(202).json({ success: true, jobId, message: 'Generation started' });
 
   } catch (error) {
-    console.error('[Generate Error]', error.message);
-    res.status(500).json({ success: false, message: error.message || 'Generation failed' });
+    console.error('[Generate Route Error]', error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Generation failed. Please try again.'
+    });
   }
+});
+
+// ─── GET /api/generate/status/:jobId ──────────────────────────────────────────
+router.get('/status/:jobId', protect, (req, res) => {
+  const job = tryOnManager.getJob(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ success: false, message: 'Job not found' });
+  }
+  if (job.userId.toString() !== req.user._id.toString()) {
+    return res.status(403).json({ success: false, message: 'Unauthorized' });
+  }
+  res.json({ success: true, job });
 });
 
 export default router;

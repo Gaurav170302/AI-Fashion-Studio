@@ -8,6 +8,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const validExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+const EXCLUDED_FILES = ['models.json', 'thumbs.db', '.ds_store'];
+
 
 const formatName = (filename) => {
   const nameWithoutExt = path.parse(filename).name;
@@ -29,6 +31,7 @@ router.get('/', (req, res) => {
   try {
     const modelsDir = path.join(__dirname, '../public/models');
     const categories = ['male', 'female', 'kids'];
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
     
     const result = {
       male: [],
@@ -43,14 +46,16 @@ router.get('/', (req, res) => {
           const files = fs.readdirSync(categoryDir);
           files.forEach(file => {
             const ext = path.extname(file).toLowerCase();
-            if (validExtensions.includes(ext)) {
+            const lower = file.toLowerCase();
+            if (validExtensions.includes(ext) && !EXCLUDED_FILES.includes(lower)) {
+
               const id = path.parse(file).name;
               result[category].push({
                 id: id,
                 name: formatName(file),
                 pose: getPose(file),
                 gender: category,
-                imageUrl: `/models/${category}/${file}`
+                imageUrl: `${baseUrl}/models/${category}/${file}`
               });
             }
           });
