@@ -13,7 +13,11 @@ const GarmentSchema = new mongoose.Schema({
   category: {
     type: String,
     required: [true, 'Please add a category'],
-    enum: ['T-Shirt', 'Shirt', 'Hoodie', 'Dress', 'Person']
+    enum: [
+      'T-Shirt', 'Shirt', 'Hoodie', 'Dress',
+      'Jacket', 'Kurta', 'Blazer', 'Pants',
+      'Saree', 'Person'
+    ]
   },
   createdAt: {
     type: Date,

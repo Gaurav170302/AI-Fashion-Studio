@@ -3,6 +3,7 @@ import Replicate from 'replicate';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { v2 as cloudinary } from 'cloudinary';
 import Garment from '../models/Garment.js';
 import GeneratedImage from '../models/GeneratedImage.js';
 import { protect } from '../middleware/auth.js';
@@ -12,42 +13,107 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ─── Upload any local file to Litterbox → public URL ──────────────────────────
-async function uploadToLitterbox(localFilePath) {
+const isCloudinaryConfigured = () => {
+  return (
+    process.env.CLOUDINARY_CLOUD_NAME &&
+    process.env.CLOUDINARY_API_KEY &&
+    process.env.CLOUDINARY_API_SECRET
+  );
+};
+
+// ─── Upload any local file to a public URL (Cloudinary -> Tmpfiles -> Catbox) ──
+async function uploadPublicImage(localFilePath) {
   try {
     if (!fs.existsSync(localFilePath)) {
-      throw new Error(`File not found at: ${localFilePath}`);
+      console.error(`[Upload] File not found at: ${localFilePath}`);
+      return null;
     }
-    const fileBuffer = fs.readFileSync(localFilePath);
-    const filename = path.basename(localFilePath);
-    const ext = path.extname(filename).toLowerCase();
-    const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
 
-    const formData = new FormData();
-    formData.append('reqtype', 'fileupload');
-    formData.append('time', '1h'); // 1 hour — enough for generation
-    formData.append('fileToUpload', new Blob([fileBuffer], { type: mimeType }), filename);
+    // Strategy 1: Cloudinary (if credentials exist)
+    if (isCloudinaryConfigured()) {
+      try {
+        cloudinary.config({
+          cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+          api_key: process.env.CLOUDINARY_API_KEY,
+          api_secret: process.env.CLOUDINARY_API_SECRET
+        });
+        console.log(`[Cloudinary] Uploading local file: ${path.basename(localFilePath)}`);
+        const result = await cloudinary.uploader.upload(localFilePath, {
+          folder: 'ai_fashion_studio'
+        });
+        if (result && result.secure_url) {
+          console.log(`✓ [Cloudinary] Uploaded successfully: ${result.secure_url}`);
+          return result.secure_url;
+        }
+      } catch (cloudErr) {
+        console.error(`[Cloudinary] Upload failed, trying fallbacks: ${cloudErr.message}`);
+      }
+    }
 
-    const response = await fetch('https://litterbox.catbox.moe/resources/internals/api.php', {
-      method: 'POST',
-      body: formData,
-      signal: AbortSignal.timeout(30000)
-    });
+    // Strategy 2: Tmpfiles.org
+    try {
+      console.log(`[Tmpfiles] Uploading local file: ${path.basename(localFilePath)}`);
+      const fileBuffer = fs.readFileSync(localFilePath);
+      const filename = path.basename(localFilePath);
+      const formData = new FormData();
+      formData.append('file', new Blob([fileBuffer]), filename);
 
-    if (!response.ok) throw new Error(`Litterbox HTTP ${response.status}`);
-    const text = (await response.text()).trim();
-    if (!text.startsWith('http')) throw new Error(`Litterbox bad response: "${text}"`);
+      const response = await fetch('https://tmpfiles.org/api/v1/upload', {
+        method: 'POST',
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        body: formData,
+        signal: AbortSignal.timeout(15000)
+      });
+      if (response.ok) {
+        const json = await response.json();
+        if (json && json.data && json.data.url) {
+          const directUrl = json.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+          console.log(`✓ [Tmpfiles] Uploaded successfully: ${directUrl}`);
+          return directUrl;
+        }
+      }
+    } catch (tmpErr) {
+      console.error(`[Tmpfiles] Upload failed: ${tmpErr.message}`);
+    }
 
-    console.log(`✓ Uploaded to Litterbox: ${text}`);
-    return text;
+    // Strategy 3: Catbox.moe
+    try {
+      console.log(`[Catbox] Uploading local file: ${path.basename(localFilePath)}`);
+      const fileBuffer = fs.readFileSync(localFilePath);
+      const filename = path.basename(localFilePath);
+      const ext = path.extname(filename).toLowerCase();
+      const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+
+      const formData = new FormData();
+      formData.append('reqtype', 'fileupload');
+      formData.append('fileToUpload', new Blob([fileBuffer], { type: mimeType }), filename);
+
+      const response = await fetch('https://catbox.moe/user/api.php', {
+        method: 'POST',
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        body: formData,
+        signal: AbortSignal.timeout(15000)
+      });
+      if (response.ok) {
+        const text = (await response.text()).trim();
+        if (text.startsWith('http')) {
+          console.log(`✓ [Catbox] Uploaded successfully: ${text}`);
+          return text;
+        }
+      }
+    } catch (catErr) {
+      console.error(`[Catbox] Upload failed: ${catErr.message}`);
+    }
+
+    console.error(`✗ All public upload strategies failed for: ${localFilePath}`);
+    return null;
   } catch (err) {
-    console.error(`✗ Litterbox upload failed: ${err.message}`);
+    console.error(`✗ Public image upload error: ${err.message}`);
     return null;
   }
 }
 
 // ─── Resolve a model/person image URL to a public-accessible URL ───────────────
-// If it's a localhost URL (local model file), upload it to Litterbox first.
 async function resolveToPublicUrl(rawUrl, localSearchDirs = []) {
   if (!rawUrl) return null;
 
@@ -63,8 +129,8 @@ async function resolveToPublicUrl(rawUrl, localSearchDirs = []) {
   for (const dir of localSearchDirs) {
     const fullPath = path.join(dir, filename);
     if (fs.existsSync(fullPath)) {
-      console.log(`[Litterbox] Found local file: ${fullPath}`);
-      return await uploadToLitterbox(fullPath);
+      console.log(`[Resolve] Found local file: ${fullPath}`);
+      return await uploadPublicImage(fullPath);
     }
   }
 
@@ -74,8 +140,8 @@ async function resolveToPublicUrl(rawUrl, localSearchDirs = []) {
     const relativePath = modelMatch[1];
     const absPath = path.join(__dirname, '../public/models', relativePath);
     if (fs.existsSync(absPath)) {
-      console.log(`[Litterbox] Found model image: ${absPath}`);
-      return await uploadToLitterbox(absPath);
+      console.log(`[Resolve] Found model image: ${absPath}`);
+      return await uploadPublicImage(absPath);
     }
   }
 
@@ -83,12 +149,12 @@ async function resolveToPublicUrl(rawUrl, localSearchDirs = []) {
   if (uploadMatch) {
     const absPath = path.join(__dirname, '../public/uploads', uploadMatch[1]);
     if (fs.existsSync(absPath)) {
-      console.log(`[Litterbox] Found upload file: ${absPath}`);
-      return await uploadToLitterbox(absPath);
+      console.log(`[Resolve] Found upload file: ${absPath}`);
+      return await uploadPublicImage(absPath);
     }
   }
 
-  console.warn(`[Litterbox] Could not resolve "${rawUrl}" to a local file`);
+  console.warn(`[Resolve] Could not resolve "${rawUrl}" to a local file`);
   return null;
 }
 
@@ -103,7 +169,9 @@ router.post('/', protect, async (req, res) => {
       category,
       personImageId,
       staticModelUrl,
-      qualityMode
+      qualityMode,
+      featureMode,
+      garmentName
     } = req.body;
 
     // ── Validate required fields ─────────────────────────────────────────────
@@ -149,11 +217,11 @@ router.post('/', protect, async (req, res) => {
         // Already public (Cloudinary, etc.)
         garmentPublicUrl = rawGarmentUrl;
       } else {
-        // Local file — upload to Litterbox
+        // Local file — upload to public URL
         const filename = path.basename(rawGarmentUrl.split('?')[0]);
         const localPath = path.join(__dirname, '../public/uploads', filename);
-        console.log(`[Garment] Uploading to Litterbox: ${filename}`);
-        garmentPublicUrl = await uploadToLitterbox(localPath);
+        console.log(`[Garment] Uploading local file to public URL: ${filename}`);
+        garmentPublicUrl = await uploadPublicImage(localPath);
       }
     }
 
@@ -183,8 +251,8 @@ router.post('/', protect, async (req, res) => {
       } else {
         const pFilename = path.basename(rawPersonUrl.split('?')[0]);
         const pLocalPath = path.join(__dirname, '../public/uploads', pFilename);
-        console.log(`[Person] Uploading custom person to Litterbox: ${pFilename}`);
-        personPublicUrl = await uploadToLitterbox(pLocalPath);
+        console.log(`[Person] Uploading custom person to public URL: ${pFilename}`);
+        personPublicUrl = await uploadPublicImage(pLocalPath);
       }
 
     } else if (staticModelUrl) {
@@ -235,7 +303,10 @@ router.post('/', protect, async (req, res) => {
       garmentCategory,
       style || 'Casual',
       pose || 'Standing',
-      modelType || 'Female'
+      modelType || 'male',
+      featureMode || 'virtual-tryon',
+      qualityMode || 'Standard',
+      garmentName || ''
     );
 
     // Background execution
@@ -245,18 +316,84 @@ router.post('/', protect, async (req, res) => {
         const job = tryOnManager.getJob(jobId);
 
         if (job?.status === 'completed' && job.resultUrl) {
+          let finalGeneratedUrl = job.resultUrl;
+
+          // If result is from HuggingFace, download and save it permanently (bypass hotlink/CORS blocks)
+          if (job.resultUrl.includes('.hf.space')) {
+            console.log(`[Generate] Downloading HF result image: ${job.resultUrl}`);
+            try {
+              const fetchWithRetry = async (url, retries = 3, delay = 1000) => {
+                for (let i = 0; i < retries; i++) {
+                  try {
+                    const res = await fetch(url, { signal: AbortSignal.timeout(45000) });
+                    if (res.ok) return res;
+                    throw new Error(`HTTP ${res.status} ${res.statusText}`);
+                  } catch (err) {
+                    if (i === retries - 1) throw err;
+                    console.warn(`[Generate] Fetch attempt ${i + 1} failed for result image: ${err.message}. Retrying...`);
+                    await new Promise(r => setTimeout(r, delay));
+                  }
+                }
+              };
+
+              const imgRes = await fetchWithRetry(job.resultUrl);
+              const buffer = Buffer.from(await imgRes.arrayBuffer());
+
+              if (isCloudinaryConfigured()) {
+                // Configure on-demand to guarantee credentials are set
+                cloudinary.config({
+                  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+                  api_key: process.env.CLOUDINARY_API_KEY,
+                  api_secret: process.env.CLOUDINARY_API_SECRET
+                });
+
+                // Upload buffer to Cloudinary
+                const uploadPromise = new Promise((resolve, reject) => {
+                  const stream = cloudinary.uploader.upload_stream(
+                    { folder: 'ai-fashion-studio/generated' },
+                    (error, result) => {
+                      if (error) reject(error);
+                      else resolve(result.secure_url);
+                    }
+                  );
+                  stream.end(buffer);
+                });
+
+                finalGeneratedUrl = await uploadPromise;
+                console.log(`[Generate] ✓ Uploaded HF result to Cloudinary: ${finalGeneratedUrl}`);
+              } else {
+                // Save locally
+                const filename = `result-${Date.now()}-${Math.round(Math.random() * 1e9)}.png`;
+                const localPath = path.join(__dirname, '../public/uploads', filename);
+                fs.writeFileSync(localPath, buffer);
+                const port = process.env.PORT || 5000;
+                finalGeneratedUrl = `http://localhost:${port}/uploads/${filename}`;
+                console.log(`[Generate] ✓ Saved HF result locally: ${finalGeneratedUrl}`);
+              }
+            } catch (dlErr) {
+              console.error(`[Generate] ✗ Failed to process HF result permanently: ${dlErr.message}`);
+            }
+          }
+
           const generatedImage = await GeneratedImage.create({
             userId: job.userId,
-            garmentId: job.dbGarmentId,
-            generatedImageUrl: job.resultUrl,
+            garmentId: job.dbGarmentId || undefined,
+            generatedImageUrl: finalGeneratedUrl,
+            garmentUrl: job.garmentPublicUrl,
+            modelImageUrl: job.personImageUrl,
+            featureMode: job.featureMode,
             modelType: job.modelType,
-            style: job.style,
-            pose: job.pose
+            category: job.garmentCategory,
+            style: job.style || 'Casual',
+            pose: job.pose || 'Standing'
           });
+
           tryOnManager.updateJob(jobId, {
+            resultUrl: finalGeneratedUrl, // Update in-memory job for the frontend polling response
             dbRecordId: generatedImage._id,
             message: 'Complete — saved to your history'
           });
+
           console.log(`[Generate] ✓ Saved result to DB: ${generatedImage._id}`);
         }
       } catch (err) {

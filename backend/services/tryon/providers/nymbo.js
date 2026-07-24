@@ -20,7 +20,7 @@ export default class NymboProvider extends BaseProvider {
     }
   }
 
-  async generate(personImageUrl, garmentImageUrl, garmentCategory, seed) {
+  async generate(personImageUrl, garmentImageUrl, garmentCategory, seed, qualityMode) {
     const hfOptions = process.env.HF_TOKEN ? { hf_token: process.env.HF_TOKEN } : {};
     const client = await Client.connect('Nymbo/Virtual-Try-On', hfOptions);
 

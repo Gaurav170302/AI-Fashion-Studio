@@ -9,26 +9,40 @@ const GeneratedImageSchema = new mongoose.Schema({
   garmentId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Garment',
-    required: false // Optional, can allow text/mock references
+    required: false
   },
   generatedImageUrl: {
     type: String,
     required: [true, 'Please add a generated image URL']
   },
+  garmentUrl: {
+    type: String,
+    default: null
+  },
+  modelImageUrl: {
+    type: String,
+    default: null
+  },
+  featureMode: {
+    type: String,
+    default: 'virtual-tryon'
+  },
   modelType: {
     type: String,
-    required: true,
-    enum: ['Male', 'Female', 'male', 'female', 'kids', 'custom', 'Custom']
+    default: 'male'
   },
+  category: {
+    type: String,
+    default: 'T-Shirt'
+  },
+  // Relaxed — no enum to avoid validation failures on any style value
   style: {
     type: String,
-    required: true,
-    enum: ['Casual', 'Fashion', 'Professional']
+    default: 'Casual'
   },
   pose: {
     type: String,
-    required: true,
-    enum: ['Standing', 'Walking', 'Lifestyle']
+    default: 'Standing'
   },
   createdAt: {
     type: Date,

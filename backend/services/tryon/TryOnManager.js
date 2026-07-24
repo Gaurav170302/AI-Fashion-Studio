@@ -1,18 +1,23 @@
 import ReplicateProvider from './providers/replicate.js';
 import IDMVTONProvider from './providers/idmVton.js';
-import FashnProvider from './providers/fashn.js';
+import NymboProvider from './providers/nymbo.js';
+import PollinationsProvider from './providers/pollinations.js';
 
 class TryOnManager {
   constructor() {
-    // Priority order: Replicate (paid, reliable) → IDM-VTON (free HF, tries many spaces) → FasHn.ai (free, needs key)
+    // Priority order: Replicate (paid, best quality) → IDM-VTON (free HF) → Nymbo (fallback) → Pollinations (last resort)
     this.providers = [
-      new ReplicateProvider(),   // Paid — best quality
-      new IDMVTONProvider(),     // Free HF spaces — tries 6+ mirrors
-      new FashnProvider()        // Free API — needs FASHN_API_KEY
+      new ReplicateProvider(),    // Priority 1: Paid — best quality, strict garment preservation
+      new IDMVTONProvider(),      // Priority 2: Free HF spaces — IDM-VTON algorithm
+      new NymboProvider(),        // Priority 3: Nymbo Virtual Try-On
+      new PollinationsProvider()  // Priority 4: LAST RESORT ONLY — limited garment fidelity
     ];
 
     // In-memory job store for polling
     this.jobs = new Map();
+
+    // Result cache: keyed by "garmentUrl|modelUrl" to avoid re-generating identical combos
+    this.resultCache = new Map();
   }
 
   async initializeHealth() {
@@ -32,7 +37,38 @@ class TryOnManager {
     return status;
   }
 
-  createJob(userId, dbGarmentId, personImageUrl, garmentPublicUrl, garmentCategory, style, pose, modelType) {
+  /**
+   * Build a cache key from garment + model URLs
+   */
+  buildCacheKey(garmentUrl, modelUrl) {
+    return `${garmentUrl}|${modelUrl}`;
+  }
+
+  /**
+   * Check if a cached result exists for this garment+model combo
+   */
+  getCachedResult(garmentUrl, modelUrl) {
+    const key = this.buildCacheKey(garmentUrl, modelUrl);
+    return this.resultCache.get(key) || null;
+  }
+
+  /**
+   * Store a result in the cache
+   */
+  setCachedResult(garmentUrl, modelUrl, resultUrl) {
+    const key = this.buildCacheKey(garmentUrl, modelUrl);
+    this.resultCache.set(key, {
+      resultUrl,
+      cachedAt: new Date()
+    });
+    // Evict old entries if cache grows too large (keep max 100 entries)
+    if (this.resultCache.size > 100) {
+      const firstKey = this.resultCache.keys().next().value;
+      this.resultCache.delete(firstKey);
+    }
+  }
+
+  createJob(userId, dbGarmentId, personImageUrl, garmentPublicUrl, garmentCategory, style, pose, modelType, featureMode, qualityMode, garmentName) {
     const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     this.jobs.set(jobId, {
       id: jobId,
@@ -41,9 +77,12 @@ class TryOnManager {
       personImageUrl,
       garmentPublicUrl,
       garmentCategory,
+      garmentName: garmentName || '',
       style,
       pose,
       modelType,
+      featureMode: featureMode || 'virtual-tryon',
+      qualityMode: qualityMode || 'Standard',
       status: 'pending',
       message: 'Job queued. Starting generation...',
       resultUrl: null,
@@ -66,10 +105,23 @@ class TryOnManager {
     const job = this.getJob(jobId);
     if (!job) return;
 
+    // Check cache first — skip generation if we already have a result
+    const cached = this.getCachedResult(job.garmentPublicUrl, job.personImageUrl);
+    if (cached) {
+      console.log(`[TryOnManager] Cache hit for job ${jobId} — reusing previous result`);
+      this.updateJob(jobId, {
+        status: 'completed',
+        message: 'Completed (from cache)',
+        resultUrl: cached.resultUrl
+      });
+      return;
+    }
+
     this.updateJob(jobId, { status: 'processing', message: 'Starting AI virtual try-on...' });
 
     const errors = [];
     const seed = Math.floor(Math.random() * 9999);
+    const isEnhanced = job.qualityMode === 'Premium';
 
     for (const provider of this.providers) {
       if (!provider.isAvailable) {
@@ -77,8 +129,13 @@ class TryOnManager {
         continue;
       }
 
-      this.updateJob(jobId, { message: `Running ${provider.name}... (this takes 30–90 seconds)` });
-      console.log(`[TryOnManager] Job ${jobId} → ${provider.name}`);
+      const isPollinationsFallback = provider.name === 'Pollinations';
+      const providerLabel = isPollinationsFallback
+        ? `${provider.name} (last resort — your model won't be preserved)`
+        : provider.name;
+
+      this.updateJob(jobId, { message: `Running ${providerLabel}... (this takes 30–90 seconds)` });
+      console.log(`[TryOnManager] Job ${jobId} [${job.featureMode}] → ${provider.name} (quality: ${job.qualityMode})`);
 
       try {
         const start = Date.now();
@@ -86,10 +143,17 @@ class TryOnManager {
           job.personImageUrl,
           job.garmentPublicUrl,
           job.garmentCategory,
-          seed
+          seed,
+          job.qualityMode,
+          {
+            modelType: job.modelType,
+            pose: job.pose,
+            style: job.style,
+            featureMode: job.featureMode,
+            garmentName: job.garmentName
+          }
         );
 
-        // Validate output
         if (!resultUrl || typeof resultUrl !== 'string') {
           throw new Error(`${provider.name} returned invalid output`);
         }
@@ -98,12 +162,27 @@ class TryOnManager {
         console.log(`[TryOnManager] ✓ ${provider.name} succeeded in ${duration}s`);
         console.log(`[TryOnManager] Result URL: ${resultUrl.slice(0, 100)}`);
 
+        // Only cache results from REAL try-on engines — NEVER cache Pollinations
+        // because Pollinations ignores the selected model and generates a random person.
+        // Caching it would cause repeated wrong results for the same garment.
+        if (!isPollinationsFallback) {
+          this.setCachedResult(job.garmentPublicUrl, job.personImageUrl, resultUrl);
+        } else {
+          console.warn('[TryOnManager] Pollinations result NOT cached — retries will attempt real engines again');
+        }
+
+        const completedMessage = isPollinationsFallback
+          ? `⚠ Generated via Pollinations fallback (${duration}s). Your selected model was not preserved — this is a generic fashion image. Try again when Replicate/IDM-VTON are available.`
+          : `Completed via ${provider.name} in ${duration}s`;
+
         this.updateJob(jobId, {
           status: 'completed',
-          message: `Completed via ${provider.name} in ${duration}s`,
+          providerUsed: provider.name,
+          isPollinationsFallback,
+          message: completedMessage,
           resultUrl
         });
-        return; // Done
+        return;
 
       } catch (err) {
         const msg = `${provider.name}: ${err.message}`;
@@ -118,7 +197,7 @@ class TryOnManager {
     console.error(`[TryOnManager] All providers failed: ${errorSummary}`);
     this.updateJob(jobId, {
       status: 'failed',
-      message: 'Virtual try-on could not be completed.',
+      message: 'Virtual try-on could not be completed. Please try again or use a different model image.',
       error: errorSummary
     });
   }

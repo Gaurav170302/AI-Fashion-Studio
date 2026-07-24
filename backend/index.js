@@ -1,6 +1,9 @@
+import dotenv from 'dotenv';
+// Load env vars immediately at startup
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -13,8 +16,6 @@ import modelRoutes from './routes/models.js';
 
 import { tryOnManager } from './services/tryon/TryOnManager.js';
 
-// Load env vars
-dotenv.config();
 
 // Validate Environment Variables
 function validateEnvironment() {

@@ -82,6 +82,13 @@ router.post('/upload', protect, upload.single('image'), async (req, res) => {
     let finalImageUrl = '';
 
     if (isCloudinaryConfigured()) {
+      // Configure on-demand to guarantee credentials are set
+      cloudinary.config({
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        api_secret: process.env.CLOUDINARY_API_SECRET
+      });
+
       // Upload to Cloudinary
       const result = await cloudinary.uploader.upload(req.file.path, {
         folder: 'ai-fashion-studio/garments'

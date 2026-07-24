@@ -131,7 +131,7 @@ export default function App() {
                 AI Fashion Studio
               </h1>
               <p className="text-sm text-text-secondary max-w-xl">
-                Create AI Fashion Models from Garments. Upload your design, choose a style, and generate high-fidelity photographs in seconds.
+                Professional virtual try-on and product-to-model generation for garment stores, manufacturers, wholesalers, and offline retailers. Upload your garment — get ecommerce-ready fashion photos in seconds.
               </p>
             </div>
             

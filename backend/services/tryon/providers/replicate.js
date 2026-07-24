@@ -14,11 +14,11 @@ export default class ReplicateProvider extends BaseProvider {
       return false;
     }
     this.replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN });
-    
+
     try {
-      // Just check if we can reach replicate API
       await fetch('https://api.replicate.com/v1/models/cuuupid/idm-vton', {
-        headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` }
+        headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` },
+        signal: AbortSignal.timeout(10000)
       });
       this.isAvailable = true;
       this.lastChecked = new Date();
@@ -30,22 +30,37 @@ export default class ReplicateProvider extends BaseProvider {
     }
   }
 
-  async generate(personImageUrl, garmentImageUrl, garmentCategory, seed) {
+  async generate(personImageUrl, garmentImageUrl, garmentCategory, seed, qualityMode) {
     if (!this.replicate) throw new Error('Replicate client not initialized');
+
+    // Quality tiers
+    const isEnhanced = qualityMode === 'Premium';
+    const steps = isEnhanced ? 50 : 40;
+    const guidanceScale = isEnhanced ? 4.0 : 3.5;
+
+    const category = garmentCategory.toLowerCase().includes('dress') ||
+                     garmentCategory.toLowerCase().includes('saree')
+      ? 'dresses'
+      : garmentCategory.toLowerCase().includes('pant') ||
+        garmentCategory.toLowerCase().includes('bottom')
+        ? 'lower_body'
+        : 'upper_body';
+
+    console.log(`[Replicate] Running with steps=${steps}, guidance=${guidanceScale}, category=${category}`);
 
     const output = await this.replicate.run(
       'cuuupid/idm-vton:0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985',
       {
         input: {
-          crop: true,
+          crop: false,           // Preserve hands, fingers, accessories
           seed: seed || Math.floor(Math.random() * 999999),
-          steps: 30,
-          category: garmentCategory.toLowerCase().includes('dress') ? 'dresses' : 'upper_body',
+          steps,
+          category,
           force_dc: false,
           garm_img: garmentImageUrl,
           human_img: personImageUrl,
           mask_only: false,
-          guidance_scale: 2.5
+          guidance_scale: guidanceScale
         }
       }
     );
